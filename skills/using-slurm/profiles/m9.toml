@@ -1,0 +1,63 @@
+[identity]
+name = "m9"
+purpose = "BSCC M9 CPU cluster — AMD nodes"
+maintainer = "hzxiaxz"
+
+[connection]
+repo_path_remote = "~/PfQMC.jl"
+login_shell = false
+
+[connection.ssh]
+alias = "m9"
+
+[scheduler]
+type = "slurm"
+default_partition = "amd_m9_768"
+
+[[partitions]]
+name = "amd_m9_768"
+class = "cpu"
+cores = 256
+memory = "768000M"
+max_wall = "infinite"
+
+[filesystem]
+home = "~"
+scratch = "~"
+project = "~/PfQMC.jl"
+quota = ""
+
+[network]
+internet_from_login = false
+internet_from_compute = false
+
+[region]
+region = "mainland_china"
+
+[limits.hard]
+max_walltime = "24:00:00"
+max_nodes = 1
+max_cpus = 256
+max_array_size = 5000
+
+[limits.soft]
+warn_walltime = "08:00:00"
+warn_cpus = 32
+unusual_partitions = []
+
+[limits.paths]
+allowed_roots = ["~/PfQMC.jl/results", "~"]
+
+[[gotchas]]
+symptom = "jobs receive less memory than requested or are rejected"
+cause = "amd_m9_768 uses DefMemPerCPU=2700M and MaxMemPerCPU=2764M"
+fix = "keep requested memory at or below 2700M per requested CPU"
+
+[commands]
+squeue = "squeue -u $USER"
+sacct = "sacct --format=JobID,State,ExitCode,MaxRSS,Elapsed"
+sinfo = "sinfo -o '%P %a %.10l %.6D %.6t'"
+quota_command = "sacctmgr -n -P show assoc where user=$USER format=Account,Partition,QOS,GrpTRES,MaxTRES"
+
+[notes]
+text = "Live-probed 2026-07-30 via ln1. Default partition amd_m9_768 has 256 CPU and 768 GB per node. Account bscc-m9 has QOS normal and GrpTRES cpu=2560. MaxArraySize=5000. Julia 1.12.6 is installed under ~/.juliaup/bin/julia."
