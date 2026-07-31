@@ -234,6 +234,29 @@ def _operational_rows(instances: list[dict]) -> str:
     return "\n".join(rows)
 
 
+def _su2_nc_rows(instances: list[dict]) -> str:
+    pairs = {
+        (item["name"], item["order"], item["formulation"]): item
+        for item in instances
+    }
+    rows = []
+    for name, order, formulation in sorted(pairs):
+        if formulation != "su2":
+            continue
+        reduced = pairs[(name, order, formulation)]
+        dense = pairs[(name, order, "dense")]
+        rows.append(
+            "<tr data-su2-nc-instance><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+            "<td>{:.3e}</td><td>{:.2f}x</td><td>{}</td><td>{:.3e}</td></tr>".format(
+                html.escape(name), order, dense["moment_cone_sizes"],
+                reduced["moment_cone_sizes"], abs(dense["objective"] - reduced["objective"]),
+                reduced["block_cubic_proxy"], reduced["localizer_cone_sizes"],
+                max(reduced["localizer_residual"], reduced["objective_residual"]),
+            )
+        )
+    return "\n".join(rows)
+
+
 def _baseline_rows(instances: list[dict]) -> str:
     rows = []
     for item in instances:
@@ -339,22 +362,27 @@ def render_html(evidence: dict) -> str:
 <div class="kpis"><div class="kpi"><div>Finite-Abelian baseline</div><div class="value">30 dev + 20 private</div></div>
 <div class="kpi"><div>Baseline worst spectrum error</div><div class="value">{_number(worst_spectrum)}</div></div>
 <div class="kpi"><div>Baseline worst reconstruction</div><div class="value">{_number(worst_reconstruction)}</div></div>
-<div class="kpi"><div>New SU(2) cases</div><div class="value">L=4, 6, 8</div></div></div>
+<div class="kpi"><div>SU(2) NC moment reduction</div><div class="value">operational</div></div>
+<div class="kpi"><div>New SU(2) chain cases</div><div class="value">L=4, 6, 8</div></div></div>
 <h2>1. Operational Z₂ʳ NC moment-SDP reduction</h2>
 <p>JuMP/Mosek receives separate PSD cones for every character sector, including localizers. Dense and symmetry formulations use independent compilation paths. Solver time is Mosek-reported single-run time; it is descriptive rather than a statistically stable benchmark.</p>
 <table><thead><tr><th>Instance</th><th>Order</th><th>Dense cones</th><th>Reduced cones</th><th>Coordinates</th><th>Objective gap</th><th>Cubic proxy</th><th>Solver ms</th><th>Barrier iterations</th></tr></thead><tbody>
 {_operational_rows(operational)}</tbody></table>
-<h2>2. Finite-Abelian matrix baseline (recomputed)</h2>
+<h2>2. Operational SU(2) NC moment/localizer reduction</h2>
+<p>The Pauli-word moment basis carries the global SU(2) conjugation representation. Ward identities impose rotational invariance, and fixed-M=S projection of J² produces multiplicity-space PSD cones for both the moment matrix and every SU(2)-scalar localizer.</p>
+<table><thead><tr><th>Instance</th><th>Order</th><th>Dense moment cone</th><th>SU(2) moment cones</th><th>Objective gap</th><th>Cubic proxy</th><th>SU(2) localizer cones</th><th>Max residual</th></tr></thead><tbody>
+{_su2_nc_rows(operational)}</tbody></table>
+<h2>3. Finite-Abelian matrix baseline (recomputed)</h2>
 <p>These 50 matrix instances test character-projector reduction only. Residuals use Frobenius norms (reconstruction, leakage, and commutator relative to max(1, ‖H‖_F)); cubic proxy is D³ / Σ_k d_k³.</p>
 <details open><summary><strong>All 50 baseline instances</strong> (collapse/expand)</summary><table><thead><tr><th>ID</th><th>Corpus</th><th>Family</th><th>D</th><th>Blocks</th><th>Spectrum error</th><th>Reconstruction</th><th>Orthogonality</th><th>Leakage</th><th>Symmetry commutator</th><th>Cubic proxy</th></tr></thead><tbody>
 {_baseline_rows(baseline)}</tbody></table></details>
-<h2>3. SU(2) Hilbert-space irrep/multiplicity evidence</h2>
+<h2>4. SU(2) Hilbert-space irrep/multiplicity evidence</h2>
 <p>Spin-1/2 antiferromagnetic Heisenberg open chain H=Σ_i S_i·S_(i+1), J=+1. In fixed M=S, S² projection selects one highest-weight vector per irrep copy, producing an m_S by m_S multiplicity block. Each block eigenvalue is repeated 2S+1 times to reconstruct the full spectrum. Cubic proxy is D³ / Σ_S m_S³.</p>
 <table><thead><tr><th>L</th><th>Dense D</th><th>SU(2) multiplicities m_S</th><th>Largest block</th><th>Ground energy</th><th>Spectrum error</th><th>Cubic proxy</th><th>Completeness</th></tr></thead><tbody>
 {_su2_summary_rows(cases)}</tbody></table>
 {_su2_plot(cases)}
 {_su2_sections(cases)}
-<h2>4. Automatic decomposition interface</h2>
+<h2>5. Automatic decomposition interface</h2>
 <p data-automatic-interface>For a Hamiltonian in the standard NumPy tensor-product basis, the user now supplies only the matrix and a symmetry name. The matcher infers dimension-compatible <code>local_dim^sites</code> templates, constructs the standard group action, verifies <code>[H,G]≈0</code>, and decomposes only a unique match.</p>
 <pre><code>.venv/bin/python research/candidate/run.py H.npy --symmetry su2 --output result.npz</code></pre>
 <table><thead><tr><th>Symmetry</th><th>Automatic template</th><th>Reduced sectors</th></tr></thead><tbody>
@@ -367,7 +395,7 @@ def render_html(evidence: dict) -> str:
 <p>If several tensor-product interpretations or symmetries pass, the command stops rather than guessing; <code>--local-dim</code> and <code>--sites</code> resolve the ambiguity. NPZ output preserves complex basis isometries, reduced blocks, eigenvalues, labels, and residuals. Full usage and basis conventions are in <code>research/candidate/README.md</code>.</p>
 <h2>Reproduce</h2><p><code>julia --startup-file=no --project=julia-env research/nc_moment_sdp/run.jl research/benchmark/nc-moment-sdp-operational.json</code><br><code>.venv/bin/python research/issue_229_report.py --private-dir /path/to/private/corpus</code></p>
 <p>Machine-readable artifacts: <code>research/benchmark/nc-moment-sdp-operational.json</code> and <code>research/benchmark/issue-229-evidence.json</code>.</p>
-<h2>Scope</h2><p>The Z₂ʳ NC moment-SDP implementation now performs operational moment and localizer cone reduction. The 50-case baseline establishes general finite-Abelian matrix reduction. The Heisenberg-chain cases validate SU(2) representation decomposition only; SU(2) has not yet been applied to the NC moment/localizing PSD cones.</p>
+<h2>Scope</h2><p>The Z₂ʳ and SU(2) NC moment-SDP implementations now perform operational moment and localizer cone reduction. The SU(2) path is distinct from the finite-Abelian character formulation: it validates scalar polynomials, imposes rotational Ward identities, and sends multiplicity-space PSD blocks to JuMP/Mosek. The 50-case baseline separately establishes general finite-Abelian matrix reduction, while the Heisenberg-chain cases cross-check SU(2) irrep multiplicities and spectrum reconstruction.</p>
 </main></body></html>"""
 
 

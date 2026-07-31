@@ -31,7 +31,7 @@ def test_reproducible_runner_reports_complex_and_constrained_evidence(tmp_path):
     report = json.loads(report_path.read_text())
     assert report["solver"] == "Mosek via JuMP/MosekTools"
     assert "strict realification" in report["formulation"]
-    assert len(report["instances"]) == 12
+    assert len(report["instances"]) == 16
     instances = {(instance["name"], instance["order"], instance["formulation"]): instance
                  for instance in report["instances"]}
 
@@ -56,6 +56,17 @@ def test_reproducible_runner_reports_complex_and_constrained_evidence(tmp_path):
         assert reduced["real_coordinate_count"] <= dense["real_coordinate_count"]
         assert reduced["block_cubic_proxy"] > 1.0
     assert len(instances[("equality and localizer / Z2", 2, "symmetry")]["localizer_cone_sizes"][0]) > 1
+
+    for name in ("two-site isotropic Heisenberg / SU2",
+                 "two-site isotropic Heisenberg localizer / SU2"):
+        dense = instances[(name, 2, "dense")]
+        reduced = instances[(name, 2, "su2")]
+        assert abs(dense["objective"] - reduced["objective"]) <= 1e-7
+        assert reduced["moment_cone_sizes"] == [2, 3, 1]
+        assert reduced["block_cubic_proxy"] > 1.0
+    assert instances[("two-site isotropic Heisenberg localizer / SU2", 2, "su2")][
+        "localizer_cone_sizes"
+    ] == [[1, 2]]
 
     for instance in instances.values():
         assert instance["compile_seconds"] >= 0

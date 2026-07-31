@@ -56,12 +56,13 @@ def test_committed_artifact_and_report_have_all_cases():
     su2_cases = evidence["su2_evidence"]["cases"]
     document = REPORT.read_text()
     assert len(baseline) == 50
-    assert len(operational) == 12
+    assert len(operational) == 16
     assert sum(item["corpus"] == "development" for item in baseline) == 30
     assert sum(item["corpus"] == "private" for item in baseline) == 20
     assert len(su2_cases) == 3
     assert [case["length"] for case in su2_cases] == [4, 6, 8]
     assert document.count("data-operational-instance") == 5
+    assert document.count("data-su2-nc-instance") == 2
     assert document.count("data-baseline-instance") == 50
     assert document.count("data-su2-summary") == 3
     assert document.count("data-su2-case") == 3
@@ -72,5 +73,6 @@ def test_committed_artifact_and_report_have_all_cases():
     assert document.count("data-automatic-interface") == 1
     assert "research/candidate/run.py H.npy --symmetry su2 --output result.npz" in document
     assert "research/candidate/README.md" in document
-    assert "SU(2) has not yet been applied to the NC moment/localizing PSD cones" in document
+    assert "Operational SU(2) NC moment/localizer reduction" in document
+    assert "SU(2) has not yet been applied to the NC moment/localizing PSD cones" not in document
     assert "/home/hzxiaxz" not in document
