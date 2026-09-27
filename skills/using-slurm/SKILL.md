@@ -37,7 +37,7 @@ This skill is agent-facing (harness array sweeps with run-spec manifests). **Stu
 
 ```bash
 scripts/harness_slurm.sh precheck                       # resolve profile, ssh echo ok, git dirty status
-scripts/harness_slurm.sh probe-partitions               # parsed sinfo table — agent ratifies the choice
+scripts/harness_slurm.sh probe-partitions               # usable partitions + whole-node + per-user caps — agent ratifies the choice
 scripts/harness_slurm.sh submit --test-only --script <local-script> \
     --time <t> --cpus <n>                               # local-inspected script, exact scheduler feasibility output
 scripts/harness_slurm.sh submit --array N --run-spec results/<run>/run_spec.json \

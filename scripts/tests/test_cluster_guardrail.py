@@ -279,3 +279,76 @@ def test_cli_directive_field(tmp_path, capsys):
 
     assert rc == 0
     assert capsys.readouterr().out.strip() == "gpu:script:4"
+
+
+# --------------------------------------------------------------------------- #
+# whole-node allocation
+# --------------------------------------------------------------------------- #
+WHOLE_NODE_PROFILE = PROFILE.replace(
+    "[scheduler]\n", '[scheduler]\ndefault_partition = "cpu"\n'
+) + """
+[[partitions]]
+name = "cpu"
+cores = 128
+whole_node = true
+
+[[partitions.node_types]]
+cores = 64
+features = ["older", "os-a"]
+
+[[partitions.node_types]]
+cores = 128
+features = ["newer", "os-b"]
+
+[[partitions]]
+name = "shared"
+cores = 96
+"""
+
+
+def test_node_cores_constraint_and_fallback():
+    row = g.cp.get_partition(
+        g.cp.tomllib.loads(WHOLE_NODE_PROFILE), "cpu"
+    )
+    assert g.node_cores(row, None) == 128
+    assert g.node_cores(row, "older") == 64
+    assert g.node_cores(row, "older&os-a") == 64
+    assert g.node_cores(row, "older|newer") == 128
+    assert g.node_cores(row, "missing") == 128  # no match → worst case
+    assert g.node_cores({"cores": 32}, "x") == 32
+
+
+def test_inspect_whole_node_counts_full_node(tmp_path):
+    prof = _profile(tmp_path, WHOLE_NODE_PROFILE)
+    # Default partition is whole-node: 1 task still occupies 128 cores > warn 64.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH --ntasks=1\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 128
+    assert report["resources"]["cpus_requested"] == 1
+    assert any("allocates whole nodes" in w for w in report["warnings"])
+    assert rc == 1
+    # Pinned to the smaller node type: 3 × 64 = 192, under the 256 hard cap.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -N 3\n#SBATCH -C older\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 192 and rc == 1
+    # Three of the largest nodes: 384 > 256 → hard.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -N 3\n")
+    assert g.cmd_inspect(s, prof)[1] == 2
+
+
+def test_inspect_shared_partition_and_exclusive(tmp_path):
+    prof = _profile(tmp_path, WHOLE_NODE_PROFILE)
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -p shared\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 1 and rc == 0
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -p shared\n#SBATCH --exclusive\n")
+    report, _ = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 96
+    assert any("--exclusive" in w for w in report["warnings"])
+
+
+def test_inspect_exclusive_unknown_partition_warns(tmp_path):
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -p nowhere\n#SBATCH --exclusive\n")
+    report, _ = g.cmd_inspect(s, _profile(tmp_path, WHOLE_NODE_PROFILE))
+    assert report["resources"]["cpus"] == 1
+    assert any("cannot count" in w for w in report["warnings"])

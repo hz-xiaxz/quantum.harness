@@ -46,7 +46,7 @@ scripts/harness_slurm.sh precheck          # resolve profile, ssh echo ok, git d
   wrong account.
 - **Show what's available (read-only, no gate):**
   ```bash
-  scripts/harness_slurm.sh probe-partitions    # idle/mix/alloc, cores/mem/gpu
+  scripts/harness_slurm.sh probe-partitions    # usable partitions: idle/total, hardware, whole-node, per-user caps
   ```
   plus the profile's `[commands].quota_command` if present → a compact "your
   budget / what's free" line before the first submit.

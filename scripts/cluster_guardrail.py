@@ -43,6 +43,7 @@ _SHORT_FLAGS = {
     "c": "cpus-per-task",
     "p": "partition",
     "a": "array",
+    "C": "constraint",
 }
 
 # Secret patterns. Kept specific to limit false positives on scientific code:
@@ -254,6 +255,55 @@ def build_resources(directives: dict[str, str]) -> tuple[dict, list[str]]:
     return res, warnings
 
 
+def node_cores(row: dict, constraint: str | None) -> int:
+    """Cores of the node a whole-node job may land on (worst case).
+
+    With ``node_types`` and a ``--constraint``, only node types carrying the
+    requested features count (``a&b`` / ``a,b`` need all, ``a|b`` needs any);
+    otherwise the largest node type, falling back to the row's ``cores``.
+    """
+    types = [t for t in row.get("node_types", []) if isinstance(t, dict)]
+    if types and constraint:
+        tokens = [t for t in re.split(r"[&,|\[\]*()\s]+", constraint) if t]
+        need = any if "|" in constraint else all
+        matched = [
+            t for t in types if need(tok in t.get("features", []) for tok in tokens)
+        ]
+        types = matched or types
+    if not types:
+        return int(row.get("cores", 0) or 0)
+    return max(int(t.get("cores", 0)) for t in types)
+
+
+def apply_allocation(
+    resources: dict, directives: dict[str, str], profile: dict
+) -> list[str]:
+    """Count what the scheduler will actually allocate, not what was typed.
+
+    On a partition with ``whole_node = true`` (or with ``--exclusive``) a
+    1-task job still occupies every core of its nodes, so the CPU figure the
+    limits see is ``nodes × cores-per-node``. Updates ``resources`` in place and
+    returns an explanatory warning (empty when nothing changed).
+    """
+    part = resources["partition"] or cp.get_field(profile, "scheduler.default_partition")
+    row = cp.get_partition(profile, part) if part else None
+    exclusive = "exclusive" in directives
+    if not (exclusive or (row and row.get("whole_node"))):
+        return []
+    if row is None:
+        return [f"--exclusive on partition {part!r} with no [[partitions]] row; "
+                "cannot count the cores of a whole node"]
+    per_node = node_cores(row, directives.get("constraint"))
+    nodes = resources["nodes"] or 1
+    allocated = nodes * per_node
+    if not per_node or allocated <= (resources["cpus"] or 0):
+        return []
+    resources["cpus_requested"] = resources["cpus"]
+    resources["cpus"] = allocated
+    why = "--exclusive" if exclusive else f"partition '{part}' allocates whole nodes"
+    return [f"{why}: counting {nodes} node(s) × {per_node} cores = {allocated} cpus"]
+
+
 def grade(resources: dict, limits: cp.Limits) -> tuple[list[dict], list[str]]:
     """Grade each resource against hard/soft limits. Return verdicts + warnings.
 
@@ -344,6 +394,9 @@ def cmd_inspect(script: str, profile_path: str | None) -> tuple[dict, int]:
     if not limits.configured:
         report["warnings"].append("profile has no [limits]; submitting without resource ceilings")
         overall = worst(overall, "soft")
+
+    # Informational: the adjusted CPU count is graded below; no extra tier.
+    report["warnings"].extend(apply_allocation(resources, directives, prof))
 
     verdicts, grade_warns = grade(resources, limits)
     report["verdicts"] = verdicts

@@ -19,7 +19,7 @@
 #
 # Subcommands:
 #   precheck                 resolve profile, test ssh, capture git dirty status
-#   probe-partitions         ssh sinfo and print a parsed candidate table
+#   probe-partitions         usable partitions: hardware, whole-node, per-user caps
 #   submit ...               build+run sbatch, or validate with --test-only
 #   status <jobid>           squeue the job, parse state + pending-reason category
 #   fetch <run>              rsync results/<run>/ back from the cluster
@@ -199,10 +199,17 @@ cmd_precheck() {
   [[ "$ssh_ok" == "true" || "$ssh_ok" == "dryrun" ]] || die "ssh to '$alias' failed; check ~/.ssh/config and the profile"
 }
 
+# Delegates to cluster_probe.py: one table of the partitions *this user* can
+# submit to, with node hardware, whole-node allocation and per-user QOS caps.
 cmd_probe_partitions() {
   local alias; alias="$(resolve_alias)"
-  echo -e "PARTITION\tAVAIL\tTIMELIMIT\tNODES\tSTATE"
-  remote "$alias" "sinfo -o '$SINFO_FMT'" | parse_sinfo
+  local shell_flag="--no-login-shell"
+  login_shell_enabled && shell_flag="--login-shell"
+  if [[ "${HARNESS_SLURM_DRYRUN:-0}" == "1" ]]; then
+    echo "DRYRUN cluster_probe.py --alias $alias $shell_flag --emit card" >&2
+    return 0
+  fi
+  python3 "$SCRIPT_DIR/cluster_probe.py" --alias "$alias" "$shell_flag" --emit card --name "$alias"
 }
 
 cmd_submit() {
