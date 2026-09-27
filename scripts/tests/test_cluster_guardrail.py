@@ -284,9 +284,20 @@ def test_cli_directive_field(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 # whole-node allocation
 # --------------------------------------------------------------------------- #
-WHOLE_NODE_PROFILE = PROFILE.replace(
-    "[scheduler]\n", '[scheduler]\ndefault_partition = "cpu"\n'
-) + """
+# Default partition "cpu" hands out whole nodes of two sizes; "shared" does not.
+WHOLE_NODE_PROFILE = """\
+[identity]
+name = "t"
+[connection]
+[scheduler]
+default_partition = "cpu"
+[limits.hard]
+max_walltime = "24:00:00"
+max_cpus = 256
+[limits.soft]
+warn_walltime = "08:00:00"
+warn_cpus = 64
+
 [[partitions]]
 name = "cpu"
 cores = 128
