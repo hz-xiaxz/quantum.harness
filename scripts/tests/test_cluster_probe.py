@@ -367,19 +367,19 @@ def test_main_no_login_shell(monkeypatch, capsys):
 # account "grpa" on the same mixed hardware, another group's partition, a
 # preemptible one, a GPU one, and a request-only gate whose QOS grants 0 cpus.
 SINFO9 = """\
-shared*|up|1-00:00:00|10|alloc|64|1024000|(null)|old,cpu,os8
-shared*|up|1-00:00:00|4|idle|128|1024000|(null)|new,cpu,os9
-grp|up|7-00:00:00|10|alloc|64|1024000|(null)|old,cpu,os8
-grp|up|7-00:00:00|4|idle|128|1024000|(null)|new,cpu,os9
-other|up|7-00:00:00|14|idle|128|1024000|(null)|new,cpu,os9
-preempt|up|7-00:00:00|14|mix|128|1024000|(null)|new,cpu,os9
+shared*|up|1-00:00:00|10|alloc|64|1024000|(null)|old,cpu,img-a
+shared*|up|1-00:00:00|4|idle|128|1024000|(null)|new,cpu,img-b
+grp|up|7-00:00:00|10|alloc|64|1024000|(null)|old,cpu,img-a
+grp|up|7-00:00:00|4|idle|128|1024000|(null)|new,cpu,img-b
+other|up|7-00:00:00|14|idle|128|1024000|(null)|new,cpu,img-b
+preempt|up|7-00:00:00|14|mix|128|1024000|(null)|new,cpu,img-b
 gpu|up|7-00:00:00|3|mix|64|1024000|gpu:a100:4(S:0-1)|gpu,a100
 gpu|up|7-00:00:00|2|mix|96|1536000|gpu:h100:8(S:0-1)|gpu,h100
-gate|up|infinite|30|mix|128|1024000|(null)|new,cpu,os9
+gate|up|infinite|30|mix|128|1024000|(null)|new,cpu,img-b
 """
 
 SCONTROL_PARTS = """\
-PartitionName=shared AllowAccounts=ALL AllowQos=normal,unlimit QoS=inter OverSubscribe=NO MaxTime=1-00:00:00
+PartitionName=shared AllowAccounts=ALL AllowQos=normal,short QoS=short OverSubscribe=NO MaxTime=1-00:00:00
 PartitionName=grp AllowAccounts=grpa AllowQos=normal,grpa QoS=grpa OverSubscribe=NO MaxTime=7-00:00:00
 PartitionName=other AllowAccounts=grpb AllowQos=normal,grpb QoS=grpb OverSubscribe=NO MaxTime=7-00:00:00
 PartitionName=preempt AllowAccounts=ALL AllowQos=preempt QoS=N/A OverSubscribe=EXCLUSIVE MaxTime=7-00:00:00
@@ -391,7 +391,7 @@ ASSOC = "grpa||normal,preempt|normal\n"
 
 QOS = """\
 normal||||500
-inter|1-00:00:00|cpu=256,node=4|50|500
+short|1-00:00:00|cpu=256,node=4|50|500
 grpa|7-00:00:00|cpu=2048,node=16|50|500
 grpb|7-00:00:00|cpu=4096,node=32|50|500
 gpu|7-00:00:00|cpu=432,gres/gpu=24,mem=6000G|24|500
@@ -429,8 +429,8 @@ def test_parse_partitions_node_types_and_features():
     grp = parts["grp"]
     assert grp["cores"] == 128 and grp["total_nodes"] == 14
     assert [(t["cores"], t["features"], t["nodes"]) for t in grp["node_types"]] == [
-        (64, "old,cpu,os8", 10),
-        (128, "new,cpu,os9", 4),
+        (64, "old,cpu,img-a", 10),
+        (128, "new,cpu,img-b", 4),
     ]
     # GPU partition keeps every GPU model as its own node type.
     assert len(parts["gpu"]["node_types"]) == 2
@@ -574,7 +574,7 @@ def test_card_and_toml_show_new_fields():
     toml = cp.build_partitions_toml(inv)
     assert 'name = "other"' not in toml and 'name = "gate"' not in toml
     assert "whole_node = true" in toml and 'qos = "grpa"' in toml
-    assert "[[partitions.node_types]]" in toml and 'features = ["old", "cpu", "os8"]' in toml
+    assert "[[partitions.node_types]]" in toml and 'features = ["old", "cpu", "img-a"]' in toml
     assert "[limits.hard]" in toml and "max_cpus = 2048" in toml
     assert 'unusual_partitions = ["preempt", "gpu"]' in toml
     # The emitted TOML parses and round-trips the node types.

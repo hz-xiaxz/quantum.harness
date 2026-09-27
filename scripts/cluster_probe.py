@@ -625,7 +625,7 @@ MAX_CARD_TYPES = 6
 
 
 def _fmt_node_type(t: dict) -> str:
-    """One node type for the card: ``12× 96c/1.5T genoa,rocky9``."""
+    """One node type for the card: ``12× 96c/1.5T cpu,fast-net``."""
     bits = [f"{t['nodes']}× {t['cores']}c/{fmt_mem(t['mem_mb'])}"]
     if t["gpu"]:
         bits.append(t["gpu"])
