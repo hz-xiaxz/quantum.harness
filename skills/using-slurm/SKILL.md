@@ -20,6 +20,7 @@ This skill is agent-facing (harness array sweeps with run-spec manifests). **Stu
 - Partition choice is ratified after queue probing. Do not blindly use the profile default when alternatives are viable.
 - Memory is sized against the partition's per-cpu memory before the job script is written (see **Sizing memory**).
 - Pre-submit feasibility is ratified before a real job is left queued.
+- The allocation is predicted before submit and checked against `sacct` once tasks run. A mismatch is investigated and explained before any further submission.
 - Scheduler state is not scientific evidence. `sbatch` success, `squeue COMPLETED`, and `ssh` exit status do not close reproduction claims; fetched manifests do.
 - Array jobs receive an opaque run spec and write one manifest per cell. `/using-slurm` never parses or hardcodes axis names.
 </checklist>
@@ -45,6 +46,7 @@ scripts/harness_slurm.sh submit --array N --run-spec results/<run>/run_spec.json
     --command '<cmd>' --partition <p> --time <t> --cpus <n>   # captures the job id
 scripts/harness_slurm.sh status <jobid>                 # squeue state + pending-reason category
 scripts/harness_slurm.sh fetch <run>                    # rsync results/<run>/ back
+scripts/harness_slurm.sh alloc-check <jobid>            # sacct vs the allocation predicted at submit
 scripts/harness_slurm.sh classify <run> <jobid>         # sacct + manifests -> per-cell outcome table
 scripts/harness_slurm.sh pending-cells <run> [--success-field F --success-value V]
 ```
@@ -54,7 +56,7 @@ scripts/harness_slurm.sh pending-cells <run> [--success-field F --success-value 
 3. **Ship.** Use authorized `git` flow or explicit `rsync` so the submitted script exists at its remote path.
 4. **Bootstrap only if needed.** Ensure the remote repo and declared stack are usable; dispatch `/setup-julia` only for Julia commands when Julia is not ready.
 5. **Pre-submit feasibility.** Size memory first (see **Sizing memory**). After shipping/bootstrap, run the exact request with `harness_slurm.sh submit --test-only ...`. The `--script` path must be a locally readable regular file so the helper can inspect its `#SBATCH` directives before adding command-line defaults. Partition precedence is the last partition option in `--extra`, then dedicated `--partition`, then the script's `#SBATCH --partition`, then `scheduler.default_partition`. The helper adds optional `required_gres` for the effective partition only when neither `--extra --gres` nor the script supplies `#SBATCH --gres`. Print and inspect the scheduler response. Treat QOS/resource rejection as a profile/request mismatch. If the returned estimate is impractically far away, present wait/change/stop and require ratification before leaving a real job queued.
-6. **Submit.** Run `sbatch` on the remote repo and capture job id, partition, walltime, and cell count.
+6. **Submit.** Run `sbatch` on the remote repo and capture job id, partition, walltime, and cell count. `submit` first prints the predicted `sacct` allocation (see **Predicted allocation**) and saves it as `results/.slurm/<jobid>.expect.json`; show it with the preview.
 7. **Monitor.** Check pending/running transitions, startup logs, and long-run pulses. If the job remains pending or fails at startup, surface choices rather than waiting silently.
 8. **Fetch.** On completion, sync `results/<run>/` back locally.
 9. **Diagnose.** Use `sacct` plus per-cell artifacts to classify success, OOM, walltime, logic failure, and convergence-out-of-budget.
@@ -177,7 +179,7 @@ Array job:
 Settle-time checks are ordered:
 
 1. **Pending to running.** Within 1-3 min after `sbatch`, re-check `squeue -j <jid>`. If still pending, read the reason and surface options.
-2. **Startup health.** Within 1-3 min after first `RUNNING`, tail at least one log to confirm actual compute has started.
+2. **Startup health.** Within 1-3 min after first `RUNNING`, tail at least one log to confirm actual compute has started, and run `alloc-check <jobid>` (see **Predicted allocation**).
 3. **Long-run pulse.** For multi-hour jobs, poll every 30-60 min and tail one log periodically.
 
 Pending reasons:
@@ -202,6 +204,39 @@ top -H -b -n 1 -p <pid>
 Interpret aggregate `%CPU` as cores worth of work: `234%` is about 2.34 cores. For
 serial bottlenecks, partial spread can be normal; do not cancel from one
 snapshot.
+
+## Predicted allocation
+
+What `sacct` reports for a job is fixed by the request and the partition
+policy, so it is written down before submitting and checked afterwards:
+
+```bash
+python3 scripts/cluster_guardrail.py expect <script> [--partition P --time T --cpus N --array 1-N --extra=...]
+scripts/harness_slurm.sh alloc-check <jobid>      # after the first task is RUNNING; again after completion
+```
+
+`submit` runs `expect` itself. The prediction holds, per task: partition, task count, cpus (including any raised by
+memory above `max_mem_per_cpu_mb` or by a whole-node partition), nodes,
+memory (`--mem`, or `def_mem_per_cpu_mb × cpus`), time limit, and billing
+(one unit per cpu). `alloc-check` compares each started task with it and exits
+1 on any difference; after completion it also reports peak RSS as a fraction
+of the request.
+
+A mismatch means the scheduler applied a policy the profile does not record,
+a profile field is wrong, or the submitted script differs from the one
+predicted. Before submitting anything else:
+
+1. Read `scontrol show job <jobid>` and `scontrol show partition <p>` for the
+   field that differs (`MaxMemPerCPU`, `DefMemPerCPU`, `OverSubscribe`,
+   `TRESBillingWeights`, QOS limits, `JobDefaults`).
+2. Name the cause in one line to the user (e.g. "`--mem=3G` above 2764M/cpu →
+   2 cpus billed per 1-thread task").
+3. Fix the source: lower the request, or correct the profile (re-run
+   `/setup-cluster`'s probe). Do not just widen the prediction to match.
+4. If the running job wastes allocation, offer cancel-and-resubmit vs let it finish, with the cost of each.
+
+A peak RSS far below the request (`peak_frac` ≪ 1) is not a mismatch, but the
+next submission should request less.
 
 ## Fetch and Diagnose
 

@@ -56,7 +56,7 @@ unusual_partitions = ["gpu-large"]
 allowed_roots = ["~/scratch", "~/results"]
 ```
 
-`cluster_guardrail.py inspect` grades a job script against `[limits.hard]`/`[limits.soft]`; `check-path` enforces `[limits.paths].allowed_roots`. On a `whole_node` partition (or with `#SBATCH --exclusive`) the CPU figure it grades is the allocated `nodes × cores-per-node`, not the typed task count. Likewise a `--mem` / `--mem-per-cpu` above the partition's `max_mem_per_cpu_mb` is graded at the cpu count Slurm will actually allocate, with a soft `memory` verdict. A profile with **no** `[limits]` is treated fail-closed (the guardrail warns rather than silently allowing).
+`cluster_guardrail.py inspect` grades a job script against `[limits.hard]`/`[limits.soft]`; `check-path` enforces `[limits.paths].allowed_roots`. `expect` uses the same partition fields to predict the `sacct` allocation of a job before it is submitted, and `check-alloc` compares a running job against that prediction. On a `whole_node` partition (or with `#SBATCH --exclusive`) the CPU figure it grades is the allocated `nodes × cores-per-node`, not the typed task count. Likewise a `--mem` / `--mem-per-cpu` above the partition's `max_mem_per_cpu_mb` is graded at the cpu count Slurm will actually allocate, with a soft `memory` verdict. A profile with **no** `[limits]` is treated fail-closed (the guardrail warns rather than silently allowing).
 
 ## Full example
 

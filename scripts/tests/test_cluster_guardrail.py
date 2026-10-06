@@ -449,3 +449,101 @@ def test_inspect_mem_zero_and_unparseable(tmp_path):
     s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH --mem=lots\n")
     report, rc = g.cmd_inspect(s, prof)
     assert any("unparseable memory" in w for w in report["warnings"]) and rc == 1
+
+
+# --------------------------------------------------------------------------- #
+# expect + check-alloc (predicted vs actual sacct)
+# --------------------------------------------------------------------------- #
+# Single-threaded array tasks submitted with --mem=3G on a 2764M/cpu partition:
+# Slurm gave (and billed) 2 cpus each. Task 3 has not started yet.
+SACCT_ALLOC = """\
+100_1|COMPLETED|small|2|1|3G|billing=2,cpu=2,mem=3G,node=1|1-00:00:00||01:06:45
+100_1.batch|COMPLETED||2|1||cpu=2,mem=3G,node=1||192904K|01:06:45
+100_1.extern|COMPLETED||2|1||billing=2,cpu=2,mem=3G,node=1||0|01:06:45
+100_2|RUNNING|small|2|1|3G|billing=2,cpu=2,mem=3G,node=1|1-00:00:00||00:13:33
+100_2.batch|RUNNING||2|1||cpu=2,mem=3G,node=1|||00:13:33
+100_3|PENDING|small|0|1|3G||1-00:00:00||00:00:00
+"""
+JOB_3G = "#SBATCH -c 1\n#SBATCH --mem=3G\n#SBATCH -t 24:00:00\n#SBATCH --array=1-3\n"
+
+
+def test_sacct_format_matches_helper():
+    text = (g.Path(__file__).resolve().parents[1] / "harness_slurm.sh").read_text()
+    assert f"SACCT_ALLOC_FMT='{g.SACCT_ALLOC_FMT}'" in text
+
+
+def test_expect_predicts_memory_raised_cpus(tmp_path):
+    e = g.cmd_expect(_script(tmp_path, JOB_3G), _profile(tmp_path, MEM_PROFILE), {})
+    assert (e["partition"], e["tasks"], e["cpus_per_task"], e["cpus_requested"]) == ("small", 3, 2, 1)
+    assert e["mem_mb_per_task"] == 3072 and e["billing_per_task"] == 2
+    assert e["timelimit_s"] == 86400
+    # Command-line options win over #SBATCH lines, as in sbatch.
+    e = g.cmd_expect(_script(tmp_path, JOB_3G), _profile(tmp_path, MEM_PROFILE), {"mem": "2G"})
+    assert e["cpus_per_task"] == 1 and e["mem_mb_per_task"] == 2048
+
+
+def test_expect_default_memory_and_missing_profile(tmp_path):
+    e = g.cmd_expect(_script(tmp_path, "#SBATCH -c 4\n"), _profile(tmp_path, MEM_PROFILE), {})
+    assert e["mem_mb_per_task"] == 4 * 2700 and e["timelimit_s"] is None
+    assert any("DefMemPerCPU" in a for a in e["assumptions"])
+    e = g.cmd_expect(_script(tmp_path, "#SBATCH -c 4\n"), str(tmp_path / "absent.toml"), {})
+    assert e["cpus_per_task"] == 4 and e["mem_mb_per_task"] is None
+    assert any("without partition policy" in w for w in e["warnings"])
+
+
+def test_check_alloc_matches_prediction(tmp_path):
+    e = g.cmd_expect(_script(tmp_path, JOB_3G), _profile(tmp_path, MEM_PROFILE), {})
+    report, rc = g.check_alloc(SACCT_ALLOC, e)
+    assert rc == 0
+    t = {r["task"]: r for r in report["tasks"]}
+    assert t["100_1"]["verdict"] == "ok" and t["100_3"]["verdict"] == "pending"
+    assert t["100_1"]["peak_frac"] == pytest.approx(188.4 / 3072, abs=1e-3)
+    assert "peak_frac" not in t["100_2"]  # still running: no MaxRSS yet
+    assert report["summary"]["billing_vs_predicted"] == 1.0
+
+
+def test_check_alloc_reports_each_difference(tmp_path):
+    # Predicted from a 2G request: one cpu, one billing unit, 2048M.
+    e = g.cmd_expect(_script(tmp_path, JOB_3G), _profile(tmp_path, MEM_PROFILE), {"mem": "2G"})
+    report, rc = g.check_alloc(SACCT_ALLOC, e)
+    assert rc == 1 and report["summary"]["mismatched"] == 2
+    assert report["tasks"][0]["issues"] == [
+        "cpus: sacct 2, predicted 1",
+        "billing: sacct 2, predicted 1",
+        "mem_mb: sacct 3072, predicted 2048",
+    ]
+    assert report["summary"]["billing_vs_predicted"] == 2.0
+    other = dict(e, partition="big", timelimit_s=3600, tasks=5, cpus_per_task=2,
+                 billing_per_task=2, mem_mb_per_task=3072)
+    report, rc = g.check_alloc(SACCT_ALLOC, other)
+    assert "partition: sacct small, predicted big" in report["tasks"][0]["issues"]
+    assert "timelimit_s: sacct 86400, predicted 3600" in report["tasks"][0]["issues"]
+    assert report["summary"]["task_count"] == "sacct 3, predicted 5" and rc == 1
+
+
+def test_check_alloc_old_reqmem_suffixes():
+    text = "7|RUNNING|p|4|2|1Gc|billing=4,cpu=4,mem=4G,node=2|01:00:00||00:01:00\n"
+    report, rc = g.check_alloc(text, {"cpus_per_task": 4, "mem_mb_per_task": 4096})
+    assert rc == 0  # 1G per cpu × 4 cpus
+    text = text.replace("1Gc", "3Gn")
+    assert g.check_alloc(text, {"mem_mb_per_task": 6144})[1] == 0  # 3G per node × 2
+
+
+def test_check_alloc_empty_and_all_pending():
+    assert g.check_alloc("", {})[0]["summary"]["note"].startswith("no sacct rows")
+    report, rc = g.check_alloc("9|PENDING|p|0|1|2G||01:00:00||00:00:00\n", {"cpus_per_task": 1})
+    assert rc == 0 and report["summary"]["tasks_judged"] == 0
+
+
+def test_main_expect_and_check_alloc(tmp_path, monkeypatch, capsys):
+    import io
+
+    script, prof = _script(tmp_path, JOB_3G), _profile(tmp_path, MEM_PROFILE)
+    assert g.main(["expect", script, "--profile", prof, "--extra=--mem=2G --partition=big"]) == 0
+    out = capsys.readouterr()
+    e = g.json.loads(out.out)
+    assert e["partition"] == "big" and e["mem_mb_per_task"] == 2048
+    assert "expected sacct (per task): partition=big" in out.err
+    monkeypatch.setattr("sys.stdin", io.StringIO(SACCT_ALLOC))
+    assert g.main(["check-alloc", "--cpus", "1", "--mem", "3G"]) == 1
+    assert '"cpus: sacct 2, predicted 1"' in capsys.readouterr().out

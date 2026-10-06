@@ -24,6 +24,9 @@
 #   status <jobid>           squeue the job, parse state + pending-reason category
 #   fetch <run>              rsync results/<run>/ back from the cluster
 #   classify <run> <jobid>   sacct + per-cell manifests -> cell outcome table
+#   alloc-check <jobid> [--cpus N [--mem SIZE]]
+#                            sacct vs the allocation predicted at submit
+#                            (results/.slurm/<jobid>.expect.json); exit 1 on mismatch
 #   pending-cells <run>      list planned cells lacking a success-tagged manifest
 #
 # Pure helpers (read stdin; used internally, exposed for testing):
@@ -37,6 +40,9 @@ PROFILE_DEFAULT="skills/using-slurm/profiles/active.toml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SINFO_FMT='%P %a %.10l %.6D %.6t'
 SACCT_FMT='JobID,State,ExitCode,MaxRSS,Elapsed'
+# Must match SACCT_ALLOC_FMT in cluster_guardrail.py (a test checks this).
+SACCT_ALLOC_FMT='JobID,State,Partition,AllocCPUS,NNodes,ReqMem,AllocTRES,Timelimit,MaxRSS,Elapsed'
+EXPECT_DIR="${HARNESS_EXPECT_DIR:-results/.slurm}"
 
 die() { echo "harness_slurm: $*" >&2; exit 1; }
 
@@ -291,6 +297,13 @@ cmd_submit() {
   [[ -n "$extra" ]]     && sbatch="$sbatch $extra"
   sbatch="$sbatch --export=$exports $script"
 
+  # The allocation sacct will report is predictable from the request and the
+  # partition policy: write it down now, compare after start (alloc-check).
+  local expect
+  expect="$(python3 "$SCRIPT_DIR/cluster_guardrail.py" expect "$script" --profile "$(profile_path)" \
+              ${partition:+--partition "$partition"} ${walltime:+--time "$walltime"} \
+              ${cpus:+--cpus "$cpus"} ${array:+--array "1-$array"} --extra="$extra")" \
+    || die "submit: could not predict the allocation"
   local out
   out="$(remote "$alias" "cd $repo && $sbatch")"
   if [[ "${HARNESS_SLURM_DRYRUN:-0}" == "1" ]]; then return 0; fi
@@ -300,11 +313,14 @@ cmd_submit() {
   fi
   local jobid; jobid="$(printf '%s' "$out" | grep -oE 'Submitted batch job [0-9]+' | awk '{print $NF}')"
   [[ -n "$jobid" ]] || { printf '%s\n' "$out" >&2; die "could not parse a job id from sbatch output"; }
+  mkdir -p "$EXPECT_DIR"
+  printf '%s\n' "$expect" > "$EXPECT_DIR/$jobid.expect.json"
   echo "job_id:    $jobid"
   echo "partition: ${partition:-<profile-default>}"
   echo "walltime:  ${walltime:-<profile-default>}"
   echo "n_cells:   ${array:-1}"
   echo "script:    $script"
+  echo "expect:    $EXPECT_DIR/$jobid.expect.json   (check with: alloc-check $jobid)"
 }
 
 cmd_status() {
@@ -375,6 +391,35 @@ for idx, cell in enumerate(cells, start=1):
         cls = "manifest-present" if os.path.isfile(man) else "no-record"
     print(f"{cell}\t{state}\t{code}\t{maxrss}\t{elapsed}\t{cls}")
 PY
+}
+
+# Compare what the scheduler gave each task (partition, cpus, nodes, billing,
+# memory, time limit; peak RSS once known) with the allocation predicted at
+# submit. Run when tasks are RUNNING, and again after completion. Exit 1 on a
+# mismatch — the agent then finds out why before submitting more.
+# --cpus/--mem replace the saved prediction (jobs submitted outside `submit`).
+cmd_alloc_check() {
+  local jobid="${1:?alloc-check: <jobid> required}"; shift || true
+  local cpus="" mem=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cpus) cpus="$2"; shift 2 ;;
+      --mem) mem="$2"; shift 2 ;;
+      *) die "alloc-check: unknown flag $1" ;;
+    esac
+  done
+  local expect_file="$EXPECT_DIR/${jobid%%_*}.expect.json" args=()
+  if [[ -n "$cpus" ]]; then
+    args=(--cpus "$cpus"); [[ -n "$mem" ]] && args+=(--mem "$mem")
+  elif [[ -f "$expect_file" ]]; then
+    args=(--expect "$expect_file")
+  else
+    die "alloc-check: no prediction at $expect_file; pass --cpus N [--mem SIZE]"
+  fi
+  local alias; alias="$(resolve_alias)"
+  local rows; rows="$(remote "$alias" "sacct -j $jobid -n -P -o $SACCT_ALLOC_FMT")"
+  [[ "${HARNESS_SLURM_DRYRUN:-0}" == "1" ]] && return 0
+  printf '%s\n' "$rows" | python3 "$SCRIPT_DIR/cluster_guardrail.py" check-alloc "${args[@]}"
 }
 
 cmd_pending_cells() {
@@ -537,6 +582,7 @@ case "$sub" in
   smoke-verdict)    cmd_smoke_verdict "$@" ;;
   fetch)            cmd_fetch "$@" ;;
   classify)         cmd_classify "$@" ;;
+  alloc-check)      cmd_alloc_check "$@" ;;
   pending-cells)    cmd_pending_cells "$@" ;;
   parse-sinfo)      parse_sinfo ;;
   parse-sacct)      parse_sacct ;;
