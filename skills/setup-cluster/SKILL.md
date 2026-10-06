@@ -115,13 +115,18 @@ The probe drops partitions the user's associations cannot submit to (other
 groups' accounts, a QOS that grants 0 cpus), lists each partition's node types
 and features, reads the per-user QOS caps, and dry-runs a 1-task job per CPU
 partition with `sbatch --test-only` (nothing is submitted) to detect partitions
-that hand out whole nodes. It exits non-zero rather than emit an empty
-inventory when `sinfo` times out — retry then.
+that hand out whole nodes. It also records each partition's `DefMemPerCPU` /
+`MaxMemPerCPU` (from `scontrol show partition`, falling back to `scontrol show
+config`) as `def_mem_per_cpu_mb` / `max_mem_per_cpu_mb`: job sizing needs them,
+and many sites set them per partition only. It exits non-zero rather than emit
+an empty inventory when `sinfo` times out — retry then.
 
 If the profile carries `[commands].quota_command`, run it read-only over ssh for
 the student's own allocation usage (best-effort; skip with a note if absent).
 Present a compact **"what's available / your budget"** summary — say which
-partitions allocate whole nodes, since one-core jobs there waste a full node.
+partitions allocate whole nodes, since one-core jobs there waste a full node,
+and each partition's memory per cpu, since a larger `--mem` silently buys
+(and bills) extra cores.
 Purely read-only — no confirm gate.
 
 ## 3. Seed `[limits]`

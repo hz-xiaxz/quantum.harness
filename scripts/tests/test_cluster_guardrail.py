@@ -363,3 +363,89 @@ def test_inspect_exclusive_unknown_partition_warns(tmp_path):
     report, _ = g.cmd_inspect(s, _profile(tmp_path, WHOLE_NODE_PROFILE))
     assert report["resources"]["cpus"] == 1
     assert any("cannot count" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# memory per cpu
+# --------------------------------------------------------------------------- #
+# "small" caps memory per cpu (a single-threaded job asking --mem=3G gets two
+# billed cores); "big" has no partition value and falls back to the cluster-wide one.
+MEM_PROFILE = """\
+[identity]
+name = "t"
+[connection]
+[scheduler]
+default_partition = "small"
+[limits.hard]
+max_walltime = "24:00:00"
+max_cpus = 256
+[limits.soft]
+warn_walltime = "08:00:00"
+warn_cpus = 64
+[cluster_limits]
+max_mem_per_cpu_mb = 8000
+
+[[partitions]]
+name = "small"
+cores = 256
+def_mem_per_cpu_mb = 2700
+max_mem_per_cpu_mb = 2764
+
+[[partitions]]
+name = "big"
+cores = 64
+"""
+
+
+@pytest.mark.parametrize(
+    "spec,mb", [("500", 500), ("2G", 2048), ("3g", 3072), ("1T", 1048576), ("512K", 0.5), ("2GB", 2048)]
+)
+def test_parse_mem_mb(spec, mb):
+    assert g.parse_mem_mb(spec) == mb
+
+
+def test_inspect_mem_over_per_cpu_cap_counts_extra_cpus(tmp_path):
+    prof = _profile(tmp_path, MEM_PROFILE)
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -c 1\n#SBATCH --mem=3G\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 2 and report["resources"]["cpus_requested"] == 1
+    v = report["verdicts"][0]
+    assert v["field"] == "memory" and v["tier"] == "soft" and "2764M" in v["message"]
+    assert rc == 1
+    # Within the cap: clean.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -c 1\n#SBATCH --mem=2G\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 1 and rc == 0
+    # Four cpus share the node request: 10G / 4 = 2.5G each, under the cap.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -c 4\n#SBATCH --mem=10G\n")
+    assert g.cmd_inspect(s, prof)[1] == 0
+
+
+def test_inspect_mem_per_cpu_and_cluster_fallback(tmp_path):
+    prof = _profile(tmp_path, MEM_PROFILE)
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -n 4\n#SBATCH --mem-per-cpu=6G\n")
+    report, _ = g.cmd_inspect(s, prof)
+    assert report["resources"]["cpus"] == 12  # 4 tasks × ceil(6144 / 2764)
+    # "big" has no partition cap → the cluster-wide 8000M applies.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -p big\n#SBATCH --mem=7G\n")
+    assert g.cmd_inspect(s, prof)[0]["resources"]["cpus"] == 1
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH -p big\n#SBATCH --mem=16G\n")
+    assert g.cmd_inspect(s, prof)[0]["resources"]["cpus"] == 3
+
+
+def test_inspect_mem_without_known_cap_warns(tmp_path):
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH --mem=3G\n")
+    report, rc = g.cmd_inspect(s, _profile(tmp_path))
+    assert any("max_mem_per_cpu_mb" in w for w in report["warnings"]) and rc == 1
+    # No memory request: nothing to check, stays clean.
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n")
+    assert g.cmd_inspect(s, _profile(tmp_path))[1] == 0
+
+
+def test_inspect_mem_zero_and_unparseable(tmp_path):
+    prof = _profile(tmp_path, MEM_PROFILE)
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH --mem=0\n")
+    assert g.cmd_inspect(s, prof)[0]["resources"]["cpus"] == 1  # all node memory: not a per-cpu raise
+    s = _script(tmp_path, "#SBATCH --time=01:00:00\n#SBATCH --mem=lots\n")
+    report, rc = g.cmd_inspect(s, prof)
+    assert any("unparseable memory" in w for w in report["warnings"]) and rc == 1

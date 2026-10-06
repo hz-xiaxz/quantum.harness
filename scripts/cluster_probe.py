@@ -251,8 +251,19 @@ def _csv(v: str | None) -> list[str]:
     return [x for x in v.split(",") if x]
 
 
+def _mem_mb(v: str | None) -> int | None:
+    """Slurm memory field in MB (``2764``) → int; ``UNLIMITED`` / absent → ``None``."""
+    if not v or not v.isdigit() or int(v) == 0:
+        return None
+    return int(v)
+
+
 def parse_scontrol_partitions(text: str) -> dict[str, dict]:
-    """Access rules and allocation policy from ``scontrol show partition -o``."""
+    """Access rules and allocation policy from ``scontrol show partition -o``.
+
+    ``DefMemPerCPU`` / ``MaxMemPerCPU`` are read here because many sites set
+    them per partition only (``scontrol show config`` then says nothing).
+    """
     out: dict[str, dict] = {}
     for line in text.splitlines():
         kv = _kv_tokens(line)
@@ -267,6 +278,8 @@ def parse_scontrol_partitions(text: str) -> dict[str, dict]:
             "deny_qos": _csv(kv.get("DenyQos")),
             "qos": "" if qos in ("", "N/A", "(null)") else qos,
             "oversubscribe": kv.get("OverSubscribe", ""),
+            "def_mem_per_cpu_mb": _mem_mb(kv.get("DefMemPerCPU")),
+            "max_mem_per_cpu_mb": _mem_mb(kv.get("MaxMemPerCPU")),
         }
     return out
 
@@ -516,9 +529,12 @@ def annotate_partitions(
     assocs: list[dict],
     qos: dict[str, dict],
     test_only: dict[str, int],
+    cluster_limits: dict | None = None,
 ) -> None:
-    """Add ``accessible`` / ``qos`` / ``user_caps`` / ``whole_node`` in place."""
+    """Add ``accessible`` / ``qos`` / ``user_caps`` / ``whole_node`` and the
+    per-CPU memory (partition value, else the cluster-wide one) in place."""
     accounts = {a["account"] for a in assocs}
+    cluster_limits = cluster_limits or {}
     for p in partitions:
         m = meta.get(p["name"])
         p["accessible"] = partition_access(m, assocs, p["name"])
@@ -532,6 +548,12 @@ def annotate_partitions(
         p["own_account"] = bool(allow) and "ALL" not in allow and bool(set(allow) & accounts)
         exclusive = bool(m and m["oversubscribe"].upper().startswith("EXCLUSIVE"))
         p["whole_node"] = exclusive or test_only.get(p["name"], 1) > 1
+        # Asking for more memory than cpus × MaxMemPerCPU makes Slurm raise the
+        # cpu count (and the bill) silently; job sizing needs these numbers.
+        for key in ("def_mem_per_cpu_mb", "max_mem_per_cpu_mb"):
+            v = (m or {}).get(key) or cluster_limits.get(key)
+            if v:
+                p[key] = v
 
 
 def probe(runner) -> dict:
@@ -557,8 +579,8 @@ def probe(runner) -> dict:
         if cpu_names
         else {}
     )
-    annotate_partitions(partitions, meta, assocs, qos, test_only)
     limits = parse_scontrol_limits(runner.run("scontrol show config").out)
+    annotate_partitions(partitions, meta, assocs, qos, test_only, limits)
     modules = parse_modules(runner.run("module avail 2>&1 || true").out)
     internet = (
         runner.run(
@@ -624,6 +646,14 @@ def _gpu_models(p: dict) -> str:
 MAX_CARD_TYPES = 6
 
 
+def _fmt_mem_per_cpu(p: dict) -> str:
+    """``2700M/2764M`` from the partition's DefMemPerCPU / MaxMemPerCPU."""
+    d, m = p.get("def_mem_per_cpu_mb"), p.get("max_mem_per_cpu_mb")
+    if not d and not m:
+        return "—"
+    return f"{f'{d}M' if d else '—'}/{f'{m}M' if m else '—'}"
+
+
 def _fmt_node_type(t: dict) -> str:
     """One node type for the card: ``12× 96c/1.5T cpu,fast-net``."""
     bits = [f"{t['nodes']}× {t['cores']}c/{fmt_mem(t['mem_mb'])}"]
@@ -643,14 +673,16 @@ def build_card_md(inv: dict, name: str) -> str:
     )
     lines.append("")
     lines.append(
-        "| Partition | Class | Cores | Mem | GPU | Wall | Idle/Total | Whole node | Per-user caps |"
+        "| Partition | Class | Cores | Mem | Mem/cpu def/max | GPU | Wall | Idle/Total "
+        "| Whole node | Per-user caps |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for p in shown:
         gpu = _gpu_models(p) or "—"
         lines.append(
             f"| `{p['name']}`{' *' if p['is_default'] else ''} | {p['class']} | "
-            f"{p['cores']} | {fmt_mem(p['mem_mb'])} | {gpu} | {p['max_wall']} | "
+            f"{p['cores']} | {fmt_mem(p['mem_mb'])} | {_fmt_mem_per_cpu(p)} | "
+            f"{gpu} | {p['max_wall']} | "
             f"{p['idle_nodes']}/{p['total_nodes']} | "
             f"{'yes' if p.get('whole_node') else 'no'} | "
             f"{_fmt_caps(p.get('user_caps', {}))} |"
@@ -724,6 +756,9 @@ def build_partitions_toml(inv: dict) -> str:
         ]
         if p.get("whole_node"):
             out.append("whole_node = true")
+        for key in ("def_mem_per_cpu_mb", "max_mem_per_cpu_mb"):
+            if p.get(key):
+                out.append(f"{key} = {p[key]}")
         if p.get("qos"):
             out.append(f'qos = "{p["qos"]}"')
         if p.get("user_caps"):

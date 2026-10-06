@@ -298,10 +298,77 @@ def apply_allocation(
     allocated = nodes * per_node
     if not per_node or allocated <= (resources["cpus"] or 0):
         return []
-    resources["cpus_requested"] = resources["cpus"]
+    resources.setdefault("cpus_requested", resources["cpus"])
     resources["cpus"] = allocated
     why = "--exclusive" if exclusive else f"partition '{part}' allocates whole nodes"
     return [f"{why}: counting {nodes} node(s) × {per_node} cores = {allocated} cpus"]
+
+
+_MEM_UNITS = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}
+
+
+def parse_mem_mb(text: str) -> float:
+    """Slurm ``--mem`` / ``--mem-per-cpu`` value in MB (``3G`` → 3072, ``500`` → 500)."""
+    s = text.strip().upper()
+    if s.endswith("B"):
+        s = s[:-1]
+    unit = s[-1] if s and s[-1] in _MEM_UNITS else "M"
+    num = s[:-1] if s and s[-1] in _MEM_UNITS else s
+    return float(num) * _MEM_UNITS[unit]
+
+
+def apply_mem_per_cpu(
+    resources: dict, directives: dict[str, str], profile: dict
+) -> tuple[list[dict], list[str]]:
+    """Count the cpus Slurm adds when the memory request outgrows MaxMemPerCPU.
+
+    A job asking for more than ``cpus × MaxMemPerCPU`` is not rejected: Slurm
+    raises its cpu count to ``ceil(mem / MaxMemPerCPU)`` and bills every one of
+    them, while a single-threaded program leaves the extra cores idle. Updates
+    ``resources["cpus"]`` in place; returns a soft verdict (the student confirms
+    or lowers ``--mem``) and warnings.
+    """
+    mem, per_cpu = directives.get("mem"), directives.get("mem-per-cpu")
+    if not mem and not per_cpu:
+        return [], []
+    part = resources["partition"] or cp.get_field(profile, "scheduler.default_partition")
+    row = cp.get_partition(profile, part) if part else None
+    cap = (row or {}).get("max_mem_per_cpu_mb") or cp.get_field(
+        profile, "cluster_limits.max_mem_per_cpu_mb"
+    )
+    if not cap:
+        return [], [
+            f"no max_mem_per_cpu_mb for partition {part!r} in the profile; cannot tell "
+            "whether the memory request raises the cpu count (re-probe with /setup-cluster)"
+        ]
+    try:
+        if per_cpu:
+            want = parse_mem_mb(per_cpu)
+            factor = -(-want // cap)
+            raised = int((resources["cpus"] or 1) * factor) if factor > 1 else None
+            asked = f"--mem-per-cpu={per_cpu}"
+        else:
+            want = parse_mem_mb(mem)
+            if want == 0:  # --mem=0: all of a node's memory; whole-node logic applies
+                return [], []
+            nodes = resources["nodes"] or 1
+            per_node = -(-(resources["cpus"] or 1) // nodes)
+            need = int(-(-want // cap))
+            raised = need * nodes if need > per_node else None
+            asked = f"--mem={mem}"
+    except ValueError:
+        return [], [f"unparseable memory request {mem or per_cpu!r}; cannot check MaxMemPerCPU"]
+    if raised is None:
+        return [], []
+    resources.setdefault("cpus_requested", resources["cpus"])
+    resources["cpus"] = raised
+    msg = (
+        f"{asked} exceeds MaxMemPerCPU={cap}M on '{part}': Slurm raises the job to "
+        f"{raised} cpus and bills them all; request at most {int(cap)}M per cpu if the "
+        "job's peak memory fits"
+    )
+    return [{"field": "memory", "value": mem or per_cpu, "limit": f"{int(cap)}M/cpu",
+             "tier": "soft", "message": msg}], []
 
 
 def grade(resources: dict, limits: cp.Limits) -> tuple[list[dict], list[str]]:
@@ -395,18 +462,20 @@ def cmd_inspect(script: str, profile_path: str | None) -> tuple[dict, int]:
         report["warnings"].append("profile has no [limits]; submitting without resource ceilings")
         overall = worst(overall, "soft")
 
+    # Memory beyond cpus × MaxMemPerCPU silently adds (billed) cpus: soft verdict.
+    mem_verdicts, mem_warns = apply_mem_per_cpu(resources, directives, prof)
     # Informational: the adjusted CPU count is graded below; no extra tier.
     report["warnings"].extend(apply_allocation(resources, directives, prof))
 
     verdicts, grade_warns = grade(resources, limits)
-    report["verdicts"] = verdicts
-    report["warnings"].extend(grade_warns)
+    report["verdicts"] = mem_verdicts + verdicts
+    report["warnings"].extend(mem_warns + grade_warns)
 
     if secrets:
         overall = worst(overall, "hard")
-    if parse_warns or grade_warns:
+    if parse_warns or grade_warns or mem_warns:
         overall = worst(overall, "soft")
-    for v in verdicts:
+    for v in report["verdicts"]:
         overall = worst(overall, v["tier"])
 
     report["overall"] = overall

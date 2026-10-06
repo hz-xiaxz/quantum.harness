@@ -18,6 +18,7 @@ This skill is agent-facing (harness array sweeps with run-spec manifests). **Stu
 - Pre-checks must pass before submit: readable cluster profile, `ssh <alias> echo ok`, and captured local `git status --porcelain`.
 - Dirty worktree shipping requires user authorization. Do not silently commit, push, or rsync user changes.
 - Partition choice is ratified after queue probing. Do not blindly use the profile default when alternatives are viable.
+- Memory is sized against the partition's per-cpu memory before the job script is written (see **Sizing memory**).
 - Pre-submit feasibility is ratified before a real job is left queued.
 - Scheduler state is not scientific evidence. `sbatch` success, `squeue COMPLETED`, and `ssh` exit status do not close reproduction claims; fetched manifests do.
 - Array jobs receive an opaque run spec and write one manifest per cell. `/using-slurm` never parses or hardcodes axis names.
@@ -52,7 +53,7 @@ scripts/harness_slurm.sh pending-cells <run> [--success-field F --success-value 
 2. **Probe and ratify partition.** Inspect queue state and present 2-3 viable options with recommended first.
 3. **Ship.** Use authorized `git` flow or explicit `rsync` so the submitted script exists at its remote path.
 4. **Bootstrap only if needed.** Ensure the remote repo and declared stack are usable; dispatch `/setup-julia` only for Julia commands when Julia is not ready.
-5. **Pre-submit feasibility.** After shipping/bootstrap, run the exact request with `harness_slurm.sh submit --test-only ...`. The `--script` path must be a locally readable regular file so the helper can inspect its `#SBATCH` directives before adding command-line defaults. Partition precedence is the last partition option in `--extra`, then dedicated `--partition`, then the script's `#SBATCH --partition`, then `scheduler.default_partition`. The helper adds optional `required_gres` for the effective partition only when neither `--extra --gres` nor the script supplies `#SBATCH --gres`. Print and inspect the scheduler response. Treat QOS/resource rejection as a profile/request mismatch. If the returned estimate is impractically far away, present wait/change/stop and require ratification before leaving a real job queued.
+5. **Pre-submit feasibility.** Size memory first (see **Sizing memory**). After shipping/bootstrap, run the exact request with `harness_slurm.sh submit --test-only ...`. The `--script` path must be a locally readable regular file so the helper can inspect its `#SBATCH` directives before adding command-line defaults. Partition precedence is the last partition option in `--extra`, then dedicated `--partition`, then the script's `#SBATCH --partition`, then `scheduler.default_partition`. The helper adds optional `required_gres` for the effective partition only when neither `--extra --gres` nor the script supplies `#SBATCH --gres`. Print and inspect the scheduler response. Treat QOS/resource rejection as a profile/request mismatch. If the returned estimate is impractically far away, present wait/change/stop and require ratification before leaving a real job queued.
 6. **Submit.** Run `sbatch` on the remote repo and capture job id, partition, walltime, and cell count.
 7. **Monitor.** Check pending/running transitions, startup logs, and long-run pulses. If the job remains pending or fails at startup, surface choices rather than waiting silently.
 8. **Fetch.** On completion, sync `results/<run>/` back locally.
@@ -105,6 +106,28 @@ high-memory, multi-node, etc. Present 2-3 real options with:
 
 Recommended first, but alternatives must be real. Submission uses the ratified
 partition.
+
+## Sizing memory
+
+Before writing `--mem` / `--mem-per-cpu` into a job, read the partition's
+per-cpu memory:
+
+```bash
+python3 scripts/cluster_profile.py --partition <p> --field max_mem_per_cpu_mb --profile <profile>
+```
+
+Slurm does not reject a request above `cpus × max_mem_per_cpu_mb`; it raises
+the cpu count to `ceil(mem / max_mem_per_cpu_mb)` and bills all of them. A
+single-threaded cell asking `--mem=3G` on a 2764 MB/cpu partition runs on one
+core and pays for two. So:
+
+- Request `--mem ≤ cpus × max_mem_per_cpu_mb` unless the cell really needs more.
+- Size from a measured peak (`sacct -j <jid> -o MaxRSS` of a test cell) plus a
+  margin, not a round guess.
+- If the field is absent, re-probe (`/setup-cluster`) or read
+  `scontrol show partition <p>` directly — do not assume it is unlimited.
+- In the `--test-only` output, `using N processors` must equal the intended
+  cpus per cell; a larger N means memory (or a whole-node policy) is buying cores.
 
 ## First-run Bootstrap
 

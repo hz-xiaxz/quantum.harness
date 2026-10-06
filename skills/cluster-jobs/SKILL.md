@@ -65,7 +65,9 @@ Read the JSON and the exit code:
   the script. **Refuse.** Name the exact field + ceiling (or the secret rule +
   line), have the student edit. Do not submit.
 - **Exit 1 (soft-warn)** — over a `[limits.soft]` threshold, an unusual
-  partition, or an unverifiable field. Show the resource table + the warning,
+  partition, a `memory` verdict (`--mem` above the partition's per-cpu memory,
+  so Slurm adds and bills cores the job will not use — offer the lower `--mem`),
+  or an unverifiable field. Show the resource table + the warning,
   get an **explicit confirm**.
 - **Exit 0 (clean)** — show the resource table, proceed.
 

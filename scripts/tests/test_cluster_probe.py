@@ -379,8 +379,8 @@ gate|up|infinite|30|mix|128|1024000|(null)|new,cpu,img-b
 """
 
 SCONTROL_PARTS = """\
-PartitionName=shared AllowAccounts=ALL AllowQos=normal,short QoS=short OverSubscribe=NO MaxTime=1-00:00:00
-PartitionName=grp AllowAccounts=grpa AllowQos=normal,grpa QoS=grpa OverSubscribe=NO MaxTime=7-00:00:00
+PartitionName=shared AllowAccounts=ALL AllowQos=normal,short QoS=short OverSubscribe=NO MaxTime=1-00:00:00 DefMemPerCPU=2700 MaxMemPerCPU=2764
+PartitionName=grp AllowAccounts=grpa AllowQos=normal,grpa QoS=grpa OverSubscribe=NO MaxTime=7-00:00:00 DefMemPerCPU=UNLIMITED MaxMemPerCPU=UNLIMITED
 PartitionName=other AllowAccounts=grpb AllowQos=normal,grpb QoS=grpb OverSubscribe=NO MaxTime=7-00:00:00
 PartitionName=preempt AllowAccounts=ALL AllowQos=preempt QoS=N/A OverSubscribe=EXCLUSIVE MaxTime=7-00:00:00
 PartitionName=gpu AllowAccounts=ALL AllowQos=normal,gpu QoS=gpu OverSubscribe=NO MaxTime=7-00:00:00
@@ -407,7 +407,7 @@ sbatch: Job 2 to start at 2026-01-01T00:00:00 using 128 processors on nodes n2 i
 sbatch: error: Batch job submission failed: Invalid qos specification
 """
 
-SCONTROL_CFG = "MaxArraySize            = 1001\n"
+SCONTROL_CFG = "MaxArraySize            = 1001\nMaxMemPerCPU            = 8000\n"
 
 
 def _rich_runner():
@@ -448,6 +448,27 @@ def test_parse_scontrol_partitions():
     assert meta["grp"]["qos"] == "grpa"
     assert meta["preempt"]["qos"] == ""  # N/A → none
     assert meta["preempt"]["oversubscribe"] == "EXCLUSIVE"
+    assert meta["shared"]["def_mem_per_cpu_mb"] == 2700
+    assert meta["shared"]["max_mem_per_cpu_mb"] == 2764
+    assert meta["grp"]["max_mem_per_cpu_mb"] is None  # UNLIMITED
+    assert meta["preempt"]["max_mem_per_cpu_mb"] is None  # absent
+
+
+def test_probe_reads_mem_per_cpu_partition_first():
+    inv = cp.probe(_rich_runner())
+    parts = {p["name"]: p for p in inv["partitions"]}
+    # Partition value wins; otherwise the cluster-wide MaxMemPerCPU applies.
+    assert parts["shared"]["max_mem_per_cpu_mb"] == 2764
+    assert parts["shared"]["def_mem_per_cpu_mb"] == 2700
+    assert parts["grp"]["max_mem_per_cpu_mb"] == 8000
+    assert "def_mem_per_cpu_mb" not in parts["grp"]
+    md = cp.build_card_md(inv, "demo")
+    assert "Mem/cpu" in md and "2700M/2764M" in md and "—/8000M" in md
+    import tomllib
+
+    rows = {p["name"]: p for p in tomllib.loads(cp.build_partitions_toml(inv))["partitions"]}
+    assert rows["shared"]["max_mem_per_cpu_mb"] == 2764
+    assert rows["grp"]["max_mem_per_cpu_mb"] == 8000
 
 
 def test_parse_assoc_and_qos():
